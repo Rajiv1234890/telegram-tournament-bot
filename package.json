@@ -1,0 +1,31 @@
+{
+  "name": "telegram-tournament-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot for managing tournament registrations and reminders.",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "dotenv": "^16.4.7",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/telegram-tournament-bot.git"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "tournament",
+    "supabase"
+  ],
+  "author": "game247",
+  "license": "MIT"
+}
