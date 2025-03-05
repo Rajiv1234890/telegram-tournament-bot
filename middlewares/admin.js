@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // List of admin Telegram IDs
-const ADMIN_IDS = []; // Add your admin IDs here
+const ADMIN_IDS = [1066915543];
 
 export const adminMiddleware = async (ctx, next) => {
   const userId = ctx.from.id;
