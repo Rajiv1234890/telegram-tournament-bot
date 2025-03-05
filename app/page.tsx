@@ -1,7 +1,7 @@
-"use client"
+"use client";
 
-import  from "../admin/index"
+import { setupAdminPanel } from "../admin/index";
 
 export default function SyntheticV0PageForDeployment() {
-  return < />
+  return <div>Admin Panel Setup</div>;
 }

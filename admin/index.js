@@ -1,347 +1,333 @@
-const { Markup } = require("telegraf")
+import 'dotenv/config';
+import { Telegraf, session, Scenes, Markup } from "telegraf";
+import { createClient } from "@supabase/supabase-js";
+import { adminMiddleware } from "./middlewares/admin.js";
+import { registerScene } from "./scenes/register.js";
+import { addTournamentScene } from "./scenes/addTournament.js";
+import { editTournamentScene } from "./scenes/editTournament.js";
+import { joinTournamentScene } from "./scenes/joinTournament.js";
+import { withdrawScene } from "./scenes/withdraw.js";
+import { formatTournament, sendNotification } from "./utils.js";
 
-/**
- * Set up admin panel
- * @param {Telegraf} bot - Telegraf bot instance
- * @param {SupabaseClient} supabase - Supabase client
- */
-function setupAdminPanel(bot, supabase) {
-  // Admin command
-  bot.command("admin", async (ctx) => {
-    // Check if user is admin
-    const isAdmin = await checkAdmin(ctx.from.id, supabase)
-    if (!isAdmin) {
-      return ctx.reply("You do not have permission to access the admin panel.")
-    }
+// Initialize Supabase client
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-    await ctx.reply(
-      "👨‍💻 Admin Panel 👨‍💻\n\n" + "Select an option:",
-      Markup.keyboard([
-        ["🏆 Create Tournament", "📊 Tournament Results"],
-        ["💰 Pending Withdrawals", "👥 User Management"],
-        ["📢 Broadcast Message", "📈 Analytics"],
-        ["🔙 Back to Main Menu"],
-      ]).resize(),
-    )
-  })
+// Initialize bot
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-  // Handle admin options
-  bot.hears("🏆 Create Tournament", (ctx) => {
-    checkAdmin(ctx.from.id, supabase).then((isAdmin) => {
-      if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
-      ctx.scene.enter("tournamentCreationScene")
-    })
-  })
+// Set up session and scene management
+const stage = new Scenes.Stage([
+  registerScene,
+  addTournamentScene,
+  editTournamentScene,
+  joinTournamentScene,
+  withdrawScene,
+]);
+bot.use(session());
+bot.use(stage.middleware());
 
-  bot.hears("📊 Tournament Results", async (ctx) => {
-    const isAdmin = await checkAdmin(ctx.from.id, supabase)
-    if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
+// Start command
+bot.start(async (ctx) => {
+  const userId = ctx.from.id;
+  const username = ctx.from.username || ctx.from.first_name;
 
-    // Get active tournaments
-    const { data: tournaments, error } = await supabase
-      .from("tournaments")
-      .select("*")
-      .in("status", ["ready", "live"])
-      .order("start_time", { ascending: true })
+  // Check if user exists in database
+  const { data: user } = await supabase.from("users").select("*").eq("telegram_id", userId).single();
 
-    if (error) {
-      console.error("Error fetching tournaments:", error)
-      return ctx.reply("An error occurred. Please try again.")
-    }
-
-    if (!tournaments || tournaments.length === 0) {
-      return ctx.reply("No active tournaments found.")
-    }
-
-    // Display tournaments
-    await ctx.reply("Select a tournament to input results:")
-
-    for (const tournament of tournaments) {
-      await ctx.reply(
-        `${tournament.name}\n` +
-          `Mode: ${tournament.mode}\n` +
-          `Status: ${tournament.status}\n` +
-          `Players: ${tournament.registered_players}/${tournament.max_players}`,
-        Markup.inlineKeyboard([Markup.button.callback("Input Results", `input_results_${tournament.id}`)]),
-      )
-    }
-  })
-
-  bot.action(/input_results_(.+)/, (ctx) => {
-    const tournamentId = ctx.match[1]
-    ctx.scene.enter("resultInputScene", { tournamentId })
-  })
-
-  bot.hears("💰 Pending Withdrawals", async (ctx) => {
-    const isAdmin = await checkAdmin(ctx.from.id, supabase)
-    if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
-
-    // Get pending withdrawals
-    const { data: withdrawals, error } = await supabase
-      .from("withdrawals")
-      .select("*, users(name, mobile)")
-      .eq("status", "pending")
-      .order("created_at", { ascending: true })
-
-    if (error) {
-      console.error("Error fetching withdrawals:", error)
-      return ctx.reply("An error occurred. Please try again.")
-    }
-
-    if (!withdrawals || withdrawals.length === 0) {
-      return ctx.reply("No pending withdrawals found.")
-    }
-
-    // Display withdrawals
-    await ctx.reply(`Found ${withdrawals.length} pending withdrawals:`)
-
-    for (const withdrawal of withdrawals) {
-      await ctx.reply(
-        `Withdrawal #${withdrawal.id}\n\n` +
-          `User: ${withdrawal.users.name}\n` +
-          `Mobile: ${withdrawal.users.mobile}\n` +
-          `Amount: ₹${withdrawal.amount}\n` +
-          `UPI ID: ${withdrawal.upi_id}\n` +
-          `Requested: ${new Date(withdrawal.created_at).toLocaleString("en-IN")}`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback("✅ Approve", `approve_withdrawal_${withdrawal.id}`),
-            Markup.button.callback("❌ Reject", `reject_withdrawal_${withdrawal.id}`),
-          ],
-        ]),
-      )
-    }
-  })
-
-  bot.hears("👥 User Management", async (ctx) => {
-    const isAdmin = await checkAdmin(ctx.from.id, supabase)
-    if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
-
-    await ctx.reply(
-      "User Management Options:",
-      Markup.inlineKeyboard([
-        [Markup.button.callback("Search User", "search_user")],
-        [Markup.button.callback("Adjust Balance", "adjust_balance")],
-        [Markup.button.callback("Ban/Unban User", "ban_user")],
-      ]),
-    )
-  })
-
-  bot.action("search_user", (ctx) => {
-    ctx.reply("Please enter the mobile number or Telegram username of the user:")
-    // Set up a listener for the next message
-    bot.use(async (ctx, next) => {
-      if (ctx.message && ctx.message.text && !ctx.message.text.startsWith("/")) {
-        const searchTerm = ctx.message.text.trim()
-
-        // Search by mobile or username
-        const { data: users, error } = await supabase
-          .from("users")
-          .select("*")
-          .or(`mobile.eq.${searchTerm},telegram_username.eq.${searchTerm}`)
-
-        if (error) {
-          console.error("Error searching users:", error)
-          return ctx.reply("An error occurred. Please try again.")
-        }
-
-        if (!users || users.length === 0) {
-          return ctx.reply("No users found with that mobile number or username.")
-        }
-
-        // Display user details
-        for (const user of users) {
-          await ctx.reply(
-            `User Details:\n\n` +
-              `Name: ${user.name}\n` +
-              `Mobile: ${user.mobile}\n` +
-              `Telegram: @${user.telegram_username}\n` +
-              `BGMI IGN: ${user.bgmi_ign}\n` +
-              `BGMI ID: ${user.bgmi_player_id}\n` +
-              `Balance: ₹${user.balance.toFixed(2)}\n` +
-              `Status: ${user.is_banned ? "Banned" : "Active"}\n` +
-              `Registered: ${new Date(user.created_at).toLocaleDateString("en-IN")}`,
-            Markup.inlineKeyboard([
-              [
-                Markup.button.callback("Adjust Balance", `adjust_balance_${user.id}`),
-                Markup.button.callback(user.is_banned ? "Unban" : "Ban", `toggle_ban_${user.id}`),
-              ],
-            ]),
-          )
-        }
-
-        return
-      }
-
-      return next()
-    })
-  })
-
-  bot.hears("📢 Broadcast Message", (ctx) => {
-    checkAdmin(ctx.from.id, supabase).then((isAdmin) => {
-      if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
-      ctx.reply("Please enter the message you want to broadcast to all users:")
-
-      // Set up a listener for the next message
-      bot.use(async (ctx, next) => {
-        if (ctx.message && ctx.message.text && !ctx.message.text.startsWith("/")) {
-          const broadcastMessage = ctx.message.text
-
-          await ctx.reply(
-            `You are about to send the following message to all users:\n\n${broadcastMessage}\n\nAre you sure?`,
-            Markup.inlineKeyboard([
-              [
-                Markup.button.callback("✅ Send", `confirm_broadcast`),
-                Markup.button.callback("❌ Cancel", `cancel_broadcast`),
-              ],
-            ]),
-          )
-
-          // Store the message in context
-          ctx.session.broadcastMessage = broadcastMessage
-
-          return
-        }
-
-        return next()
-      })
-    })
-  })
-
-  bot.action("confirm_broadcast", async (ctx) => {
-    const isAdmin = await checkAdmin(ctx.from.id, supabase)
-    if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
-
-    const broadcastMessage = ctx.session.broadcastMessage
-    if (!broadcastMessage) {
-      return ctx.reply("No message to broadcast. Please try again.")
-    }
-
-    // Get all users
-    const { data: users, error } = await supabase.from("users").select("telegram_id").eq("is_banned", false)
-
-    if (error) {
-      console.error("Error fetching users:", error)
-      return ctx.reply("An error occurred. Please try again.")
-    }
-
-    if (!users || users.length === 0) {
-      return ctx.reply("No users found to broadcast to.")
-    }
-
-    // Send message to all users
-    let successCount = 0
-    let failCount = 0
-
-    await ctx.reply(`Broadcasting message to ${users.length} users...`)
-
-    for (const user of users) {
-      try {
-        await bot.telegram.sendMessage(user.telegram_id, `📢 Announcement 📢\n\n${broadcastMessage}`)
-        successCount++
-      } catch (err) {
-        console.error(`Failed to send message to user ${user.telegram_id}:`, err)
-        failCount++
-      }
-
-      // Add a small delay to avoid hitting rate limits
-      await new Promise((resolve) => setTimeout(resolve, 50))
-    }
-
-    await ctx.reply(`Broadcast complete!\n\nSuccess: ${successCount}\nFailed: ${failCount}`)
-
-    // Clear the stored message
-    delete ctx.session.broadcastMessage
-  })
-
-  bot.action("cancel_broadcast", (ctx) => {
-    delete ctx.session.broadcastMessage
-    ctx.reply("Broadcast cancelled.")
-  })
-
-  bot.hears("📈 Analytics", async (ctx) => {
-    const isAdmin = await checkAdmin(ctx.from.id, supabase)
-    if (!isAdmin) return ctx.reply("You do not have permission to access this feature.")
-
-    try {
-      // Get total users
-      const { count: userCount } = await supabase.from("users").select("*", { count: "exact", head: true })
-
-      // Get total tournaments
-      const { count: tournamentCount } = await supabase.from("tournaments").select("*", { count: "exact", head: true })
-
-      // Get total deposits
-      const { data: deposits } = await supabase
-        .from("transactions")
-        .select("amount")
-        .eq("type", "deposit")
-        .eq("status", "completed")
-
-      const totalDeposits = deposits ? deposits.reduce((sum, tx) => sum + tx.amount, 0) : 0
-
-      // Get total withdrawals
-      const { data: withdrawals } = await supabase
-        .from("transactions")
-        .select("amount")
-        .eq("type", "withdrawal")
-        .eq("status", "completed")
-
-      const totalWithdrawals = withdrawals ? withdrawals.reduce((sum, tx) => sum + Math.abs(tx.amount), 0) : 0
-
-      // Get new users in last 7 days
-      const oneWeekAgo = new Date()
-      oneWeekAgo.setDate(oneWeekAgo.getDate() - 7)
-
-      const { count: newUserCount } = await supabase
-        .from("users")
-        .select("*", { count: "exact", head: true })
-        .gte("created_at", oneWeekAgo.toISOString())
-
-      await ctx.reply(
-        `📊 Analytics Dashboard 📊\n\n` +
-          `Total Users: ${userCount}\n` +
-          `New Users (7 days): ${newUserCount}\n` +
-          `Total Tournaments: ${tournamentCount}\n\n` +
-          `Total Deposits: ₹${totalDeposits.toFixed(2)}\n` +
-          `Total Withdrawals: ₹${totalWithdrawals.toFixed(2)}\n` +
-          `Net Balance: ₹${(totalDeposits - totalWithdrawals).toFixed(2)}`,
-      )
-    } catch (error) {
-      console.error("Analytics error:", error)
-      await ctx.reply("An error occurred. Please try again or contact support.")
-    }
-  })
-
-  bot.hears("🔙 Back to Main Menu", (ctx) => {
-    ctx.reply(
-      "Main Menu:",
-      Markup.keyboard([
-        ["🏆 Tournaments", "💰 Deposit"],
-        ["💸 Withdraw", "👤 Profile"],
-        ["📊 Leaderboard", "🔗 Referral"],
-      ]).resize(),
-    )
-  })
-}
-
-/**
- * Check if user is admin
- * @param {number} telegramId - Telegram user ID
- * @param {SupabaseClient} supabase - Supabase client
- * @returns {Promise<boolean>} Whether user is admin
- */
-async function checkAdmin(telegramId, supabase) {
-  try {
-    const { data: user, error } = await supabase.from("users").select("is_admin").eq("telegram_id", telegramId).single()
-
-    if (error || !user) return false
-
-    return user.is_admin === true
-  } catch (error) {
-    console.error("Check admin error:", error)
-    return false
+  if (!user) {
+    // Create new user
+    await supabase.from("users").insert({
+      telegram_id: userId,
+      username: username,
+      wallet_balance: 0,
+      created_at: new Date(),
+    });
   }
-}
 
-module.exports = { setupAdminPanel }
+  ctx.reply(
+    `👋 Welcome to the Tournament Bot!\n\nUse the buttons below to navigate:`,
+    Markup.keyboard([["🏆 Tournaments", "📝 Register"], ["🎮 My Tournaments", "💰 Wallet"], ["❓ Help"]]).resize(),
+  );
+});
 
+// Help command
+bot.command("help", (ctx) => {
+  ctx.reply(
+    `*Tournament Bot Commands*\n\n` +
+      `🎮 *Basic Commands*\n` +
+      `/start - Start the bot\n` +
+      `/register - Register for tournaments\n` +
+      `/tournaments - View upcoming tournaments\n` +
+      `/join <id> - Join a specific tournament\n` +
+      `/roomid <id> - Get room ID for a tournament\n` +
+      `/withdraw - Request a withdrawal\n` +
+      `/help - Show this help message\n\n` +
+      `💰 *Wallet Commands*\n` +
+      `/wallet - Check your wallet balance\n` +
+      `/deposit - Add funds to your wallet\n\n` +
+      `👤 *User Commands*\n` +
+      `/mytournaments - View your registered tournaments\n\n` +
+      `🔐 *Admin Commands*\n` +
+      `/addtournament - Add a new tournament\n` +
+      `/edittournament <id> - Edit a tournament\n` +
+      `/deletetournament <id> - Delete a tournament\n` +
+      `/setroomid <id> <room_id> <password> - Set room details\n` +
+      `/approvewithdraw <user_id> - Approve withdrawal`,
+    { parse_mode: "Markdown" },
+  );
+});
+
+// Register command
+bot.command("register", (ctx) => ctx.scene.enter("register"));
+
+// Tournaments command
+bot.command("tournaments", async (ctx) => {
+  const { data: tournaments, error } = await supabase
+    .from("tournaments")
+    .select("*")
+    .gt("start_time", new Date().toISOString())
+    .order("start_time", { ascending: true });
+
+  if (error || !tournaments.length) {
+    return ctx.reply("No upcoming tournaments found.");
+  }
+
+  let message = "🏆 *Upcoming Tournaments*\n\n";
+
+  tournaments.forEach((tournament) => {
+    message += formatTournament(tournament);
+    message += `\nJoin with: /join ${tournament.id}\n\n`;
+  });
+
+  ctx.reply(message, {
+    parse_mode: "Markdown",
+    disable_web_page_preview: true,
+  });
+});
+
+// Join tournament command
+bot.command("join", (ctx) => {
+  const tournamentId = ctx.message.text.split(" ")[1];
+  if (!tournamentId) {
+    return ctx.reply("Please provide a tournament ID. Example: /join 123");
+  }
+  ctx.scene.enter("joinTournament", { tournamentId });
+});
+
+// My tournaments command
+bot.command("mytournaments", async (ctx) => {
+  const userId = ctx.from.id;
+
+  const { data: registrations, error } = await supabase
+    .from("registrations")
+    .select(`
+      *,
+      tournaments (*)
+    `)
+    .eq("user_id", userId);
+
+  if (error || !registrations.length) {
+    return ctx.reply("You are not registered for any tournaments.");
+  }
+
+  let message = "🎮 *Your Tournaments*\n\n";
+
+  registrations.forEach((reg) => {
+    const tournament = reg.tournaments;
+    message += formatTournament(tournament);
+    message += `\nStatus: ${reg.payment_status}\n`;
+
+    if (tournament.room_id && tournament.start_time < new Date().toISOString()) {
+      message += `Room ID: ${tournament.room_id}\n`;
+      message += `Password: ${tournament.room_password}\n`;
+    }
+
+    message += "\n";
+  });
+
+  ctx.reply(message, { parse_mode: "Markdown" });
+});
+
+// Room ID command
+bot.command("roomid", async (ctx) => {
+  const tournamentId = ctx.message.text.split(" ")[1];
+  if (!tournamentId) {
+    return ctx.reply("Please provide a tournament ID. Example: /roomid 123");
+  }
+
+  const { data: tournament, error } = await supabase.from("tournaments").select("*").eq("id", tournamentId).single();
+
+  if (error || !tournament) {
+    return ctx.reply("Tournament not found.");
+  }
+
+  // Check if user is registered
+  const userId = ctx.from.id;
+  const { data: registration } = await supabase
+    .from("registrations")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("tournament_id", tournamentId)
+    .single();
+
+  if (!registration) {
+    return ctx.reply("You are not registered for this tournament.");
+  }
+
+  if (!tournament.room_id) {
+    return ctx.reply("Room details have not been set yet. Please check back later.");
+  }
+
+  ctx.reply(
+    `🔑 *Room Details for ${tournament.name}*\n\n` +
+      `Room ID: \`${tournament.room_id}\`\n` +
+      `Password: \`${tournament.room_password}\`\n\n` +
+      `Tournament starts at: ${new Date(tournament.start_time).toLocaleString()}`,
+    { parse_mode: "Markdown" },
+  );
+});
+
+// Wallet command
+bot.command("wallet", async (ctx) => {
+  const userId = ctx.from.id;
+
+  const { data: user, error } = await supabase.from("users").select("wallet_balance").eq("telegram_id", userId).single();
+
+  if (error || !user) {
+    return ctx.reply("Error fetching wallet balance. Please try again.");
+  }
+
+  ctx.reply(
+    `💰 *Your Wallet*\n\n` +
+      `Current Balance: ₹${user.wallet_balance.toFixed(2)}\n\n` +
+      `Use /deposit to add funds\n` +
+      `Use /withdraw to request a withdrawal`,
+    { parse_mode: "Markdown" },
+  );
+});
+
+// Withdraw command
+bot.command("withdraw", (ctx) => ctx.scene.enter("withdraw"));
+
+// Admin commands with middleware
+bot.command("addtournament", adminMiddleware, (ctx) => ctx.scene.enter("addTournament"));
+bot.command("edittournament", adminMiddleware, (ctx) => {
+  const tournamentId = ctx.message.text.split(" ")[1];
+  if (!tournamentId) {
+    return ctx.reply("Please provide a tournament ID. Example: /edittournament 123");
+  }
+  ctx.scene.enter("editTournament", { tournamentId });
+});
+
+bot.command("deletetournament", adminMiddleware, async (ctx) => {
+  const tournamentId = ctx.message.text.split(" ")[1];
+  if (!tournamentId) {
+    return ctx.reply("Please provide a tournament ID. Example: /deletetournament 123");
+  }
+
+  const { error } = await supabase.from("tournaments").delete().eq("id", tournamentId);
+
+  if (error) {
+    return ctx.reply("Error deleting tournament. Please try again.");
+  }
+
+  ctx.reply("Tournament deleted successfully.");
+});
+
+bot.command("setroomid", adminMiddleware, async (ctx) => {
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 4) {
+    return ctx.reply("Please provide tournament ID, room ID and password. Example: /setroomid 123 ABCDEF 123456");
+  }
+
+  const tournamentId = parts[1];
+  const roomId = parts[2];
+  const password = parts[3];
+
+  const { error } = await supabase
+    .from("tournaments")
+    .update({
+      room_id: roomId,
+      room_password: password,
+    })
+    .eq("id", tournamentId);
+
+  if (error) {
+    return ctx.reply("Error setting room details. Please try again.");
+  }
+
+  // Notify all registered users
+  const { data: registrations } = await supabase
+    .from("registrations")
+    .select("user_id")
+    .eq("tournament_id", tournamentId);
+
+  if (registrations && registrations.length > 0) {
+    const { data: tournament } = await supabase.from("tournaments").select("name").eq("id", tournamentId).single();
+
+    registrations.forEach((reg) => {
+      sendNotification(
+        bot,
+        reg.user_id,
+        `🔑 Room details for *${tournament.name}* are now available!\n\nUse /roomid ${tournamentId} to view them.`,
+      );
+    });
+  }
+
+  ctx.reply("Room details set successfully and notifications sent to participants.");
+});
+
+bot.command("approvewithdraw", adminMiddleware, async (ctx) => {
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 2) {
+    return ctx.reply("Please provide a withdrawal ID. Example: /approvewithdraw 123");
+  }
+
+  const withdrawalId = parts[1];
+
+  // Get withdrawal details
+  const { data: withdrawal, error } = await supabase.from("withdrawals").select("*").eq("id", withdrawalId).single();
+
+  if (error || !withdrawal) {
+    return ctx.reply("Withdrawal not found.");
+  }
+
+  // Update withdrawal status
+  await supabase.from("withdrawals").update({ status: "completed", processed_at: new Date() }).eq("id", withdrawalId);
+
+  // Notify user
+  sendNotification(
+    bot,
+    withdrawal.user_id,
+    `💰 Your withdrawal request for ₹${withdrawal.amount.toFixed(2)} has been approved and processed!`,
+  );
+
+  ctx.reply("Withdrawal approved and user notified.");
+});
+
+// Handle text messages for menu navigation
+bot.hears("🏆 Tournaments", (ctx) => ctx.command.tournaments());
+bot.hears("📝 Register", (ctx) => ctx.scene.enter("register"));
+bot.hears("🎮 My Tournaments", (ctx) => ctx.command.mytournaments());
+bot.hears("💰 Wallet", (ctx) => ctx.command.wallet());
+bot.hears("❓ Help", (ctx) => ctx.command.help());
+
+// Error handling
+bot.catch((err, ctx) => {
+  console.error("Bot error:", err);
+  ctx.reply("An error occurred. Please try again later.");
+});
+
+// Start the bot
+bot
+  .launch()
+  .then(() => {
+    console.log("Bot started successfully!");
+  })
+  .catch((err) => {
+    console.error("Failed to start bot:", err);
+  });
+
+// Enable graceful stop
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
